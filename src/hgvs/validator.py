@@ -19,6 +19,7 @@ SEQ_ERROR_MSG = (
 )
 CDS_BOUND_ERROR_MSG = "Variant is outside CDS bounds (CDS length : {cds_length})"
 TX_BOUND_ERROR_MSG = "Variant is outside the transcript bounds"
+INTRON_EXON_BOUNDARY_ERROR_MSG = "Intronic variant base {exon_boundary} does not correspond with an exon boundary for transcript {ac}"
 
 BASE_OFFSET_COORD_TYPES = "cnr"
 SIMPLE_COORD_TYPES = "gmp"
@@ -96,6 +97,10 @@ class ExtrinsicValidator:
                     "{}: Variant outside transcript bounds;" " no validation provided".format(var)
                 )
                 return True  # no other checking performed
+
+            res, msg = self._n_intron_exon_boundary(var_n)
+            if res >= fail_level:
+                raise HGVSInvalidVariantError(msg)
 
         res, msg = self._c_within_cds_bound(var)
         if res >= fail_level:
@@ -193,6 +198,40 @@ class ExtrinsicValidator:
             return (ValidationLevel.ERROR, CDS_BOUND_ERROR_MSG.format(cds_length=cds_length))
         return (ValidationLevel.VALID, None)
 
+    def _n_intron_exon_boundary(self, var):
+        if var.type != "n":
+            return ValidationLevel.VALID, None
+
+        pos = var.posedit.pos
+        if pos.start.offset == 0 and pos.end.offset == 0:
+            # Skip non-intronic
+            return ValidationLevel.VALID, None
+
+        tx_info = self.hdp.get_tx_identity_info(var.ac)
+        if tx_info is None:
+            return (
+                ValidationLevel.WARNING,
+                "No transcript data for accession: {ac}".format(ac=var.ac),
+            )
+
+        exon_starts = set()
+        exon_ends = set()
+        total = 0
+        for length in tx_info["lengths"]:
+            exon_starts.add(total + 1)
+            total += length
+            exon_ends.add(total)
+
+        for iv in [pos.start, pos.end]:
+            if iv.offset > 0:
+                if iv.base not in exon_ends:
+                    return ValidationLevel.ERROR, INTRON_EXON_BOUNDARY_ERROR_MSG.format(exon_boundary=iv, ac=var.ac)
+            elif iv.offset < 0:
+                if iv.base not in exon_starts:
+                    return ValidationLevel.ERROR, INTRON_EXON_BOUNDARY_ERROR_MSG.format(exon_boundary=iv, ac=var.ac)
+
+        return ValidationLevel.VALID, None
+
     def _n_within_transcript_bounds(self, var):
         if var.type != "n":
             return (ValidationLevel.VALID, None)
@@ -203,6 +242,9 @@ class ExtrinsicValidator:
                 ValidationLevel.WARNING,
                 "No transcript data for accession: {ac}".format(ac=var.ac),
             )
+
+        # TODO - this doesn't take into account offsets
+        
         if var.posedit.pos.start.datum == Datum.SEQ_START and var.posedit.pos.start.base <= 0:
             return (ValidationLevel.ERROR, TX_BOUND_ERROR_MSG.format())
         if var.posedit.pos.end.datum == Datum.SEQ_START and var.posedit.pos.end.base > tx_len:
@@ -211,7 +253,7 @@ class ExtrinsicValidator:
 
 
 # <LICENSE>
-# Copyright 2018 HGVS Contributors (https://github.com/biocommons/hgvs)
+# Copyright 2023 HGVS Contributors (https://github.com/biocommons/hgvs)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
