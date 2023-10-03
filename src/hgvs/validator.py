@@ -222,15 +222,15 @@ class ExtrinsicValidator:
             total += length
             exon_ends.add(total)
 
-        for iv in [pos.start, pos.end]:
-            if iv.offset > 0:
-                if iv.base not in exon_ends:
-                    return ValidationLevel.ERROR, INTRON_EXON_BOUNDARY_ERROR_MSG.format(exon_boundary=iv, ac=var.ac)
-            elif iv.offset < 0:
-                if iv.base not in exon_starts:
-                    return ValidationLevel.ERROR, INTRON_EXON_BOUNDARY_ERROR_MSG.format(exon_boundary=iv, ac=var.ac)
+        # positive intron offsets are from 5', negative from 3', which means the exon boundary choice is stranded
+        # But we don't know the strand until we pick a genome build, so we can't validate that here
 
-        return ValidationLevel.VALID, None
+        for iv in [pos.start, pos.end]:
+            if iv.base not in (exon_starts | exon_ends):
+                print(f"{iv=}, {iv.datum=}")
+                print(ValidationLevel.ERROR, INTRON_EXON_BOUNDARY_ERROR_MSG.format(exon_boundary=iv, ac=var.ac))
+
+        return ValidationLevel.VALID, None  # No error
 
     def _n_within_transcript_bounds(self, var):
         if var.type != "n":
