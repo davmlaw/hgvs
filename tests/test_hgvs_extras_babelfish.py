@@ -249,6 +249,10 @@ class _SyntheticHDP:
         self.seq = seq[:middle] + seq[start:middle] + seq[end:]
 
     def get_seq(self, ac, start_i=None, end_i=None):  # noqa: ARG002
+        if start_i is not None and start_i < 0:
+            # As pysam's FastaFile.fetch, rather than slicing from the end
+            msg = f"start out of range ({start_i})"
+            raise ValueError(msg)
         return self.seq[start_i:end_i]
 
 
@@ -382,6 +386,22 @@ def test_vcf_coordinate_as_symbolic_and_explicit(synthetic_babelfish):
     # A multi-base ref isn't a dup, however long the insertion
     delins = VCFCoordinate(CHR2, position, seq[position - 1 : end], pad + "GATTACA" * 20)
     assert synthetic_babelfish.vcf_coordinate_as_symbolic(delins) == delins
+    # Near the start of the sequence there is no room for a copy preceding the insertion,
+    # nor a padding base before an inversion
+    near_start = VCFCoordinate(CHR2, 10, seq[9], seq[9] + span)
+    assert synthetic_babelfish.vcf_coordinate_as_symbolic(near_start) == near_start
+    inv_at_start = VCFCoordinate(CHR2, 1, span, reverse_complement(span))
+    assert synthetic_babelfish.vcf_coordinate_as_symbolic(inv_at_start) == inv_at_start
+    # The first base of the sequence can be the padding base
+    first_span = seq[1:61]
+    inv_after_first = VCFCoordinate(CHR2, 2, first_span, reverse_complement(first_span))
+    assert synthetic_babelfish.vcf_coordinate_as_symbolic(inv_after_first) == VCFCoordinate(
+        CHR2, 1, seq[0], "<INV>", 61
+    )
+    copy_after_first = VCFCoordinate(CHR2, 61, seq[60], seq[60] + first_span)
+    assert synthetic_babelfish.vcf_coordinate_as_symbolic(copy_after_first) == VCFCoordinate(
+        CHR2, 1, seq[0], "<DUP>", 61
+    )
     # Without symbolic_alt_min_length, a min_length is needed
     babelfish = Babelfish(synthetic_babelfish.hdp, assembly_name="GRCh38")
     with pytest.raises(ValueError, match="min_length"):

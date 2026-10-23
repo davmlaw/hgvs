@@ -37,6 +37,8 @@ from hgvs.posedit import PosEdit
 from hgvs.sequencevariant import SequenceVariant
 from hgvs.utils.position import get_start_end_interbase
 
+# Positions are 1-based, as in VCF and HGVS. An _i suffix is 0-based interbase, as hdp.get_seq takes
+
 # HGVS edit type <-> VCF symbolic ALT allele
 SYMBOLIC_DEL = "<DEL>"
 SYMBOLIC_DUP = "<DUP>"
@@ -302,8 +304,9 @@ class Babelfish:
     def _hgvs_to_vcf_symbolic(self, var_g):
         start_i, end_i = get_start_end_interbase(var_g.posedit.pos, outer_confidence=False)
         typ = var_g.posedit.edit.type
-        ref = self.hdp.get_seq(var_g.ac, start_i - 1, start_i)
-        return VCFCoordinate(var_g.ac, start_i, ref, SYMBOLIC_ALTS[typ], end=end_i), typ
+        padding_i = start_i - 1  # The base before the variant
+        ref = self.hdp.get_seq(var_g.ac, padding_i, start_i)
+        return VCFCoordinate(var_g.ac, padding_i + 1, ref, SYMBOLIC_ALTS[typ], end=end_i), typ
 
     def vcf_to_g_hgvs(self, chrom, position, ref, alt, *, end=None, svlen=None):
         """chrom is a chromosome name or accession. Symbolic alleles <DEL>, <DUP> and <INV>
@@ -385,7 +388,8 @@ class Babelfish:
             return vc
         alt = vc.alt.upper()
         self._check_symbolic_alt(alt)
-        seq = self.hdp.get_seq(vc.ac, vc.position - 1, vc.end)  # padding base onwards
+        padding_i = vc.position - 1
+        seq = self.hdp.get_seq(vc.ac, padding_i, vc.end)  # padding base onwards
         if alt == SYMBOLIC_DEL:
             return VCFCoordinate(vc.ac, vc.position, seq, seq[0])
         if alt == SYMBOLIC_DUP:
@@ -414,9 +418,15 @@ class Babelfish:
             return self._insertion_as_symbolic_dup(vc) or vc
 
         if len(ref) == len(alt) >= min_length and ref == reverse_complement(alt):
-            padding = self.hdp.get_seq(ac, position - 2, position - 1)
+            # Symbolic alts are padded with the base before
+            padding_position = position - 1
+            padding_i = padding_position - 1
+            if padding_i < 0:
+                # No padding base before an inversion at the start of the sequence
+                return vc
+            padding = self.hdp.get_seq(ac, padding_i, padding_position)
             return VCFCoordinate(
-                ac, position - 1, padding, SYMBOLIC_INV, end=position + len(ref) - 1
+                ac, padding_position, padding, SYMBOLIC_INV, end=position + len(ref) - 1
             )
         return vc
 
@@ -425,12 +435,19 @@ class Babelfish:
         ac, position = vc.ac, vc.position
         inserted = vc.alt[1:].upper()
         length = len(inserted)
+        insertion_i = position  # Between the ref base at position and the next
         # Left aligned, the inserted copy precedes the bases it duplicates
-        if self.hdp.get_seq(ac, position, position + length) == inserted:
+        if self.hdp.get_seq(ac, insertion_i, insertion_i + length) == inserted:
             return VCFCoordinate(ac, position, vc.ref.upper(), SYMBOLIC_DUP, end=position + length)
-        padded = self.hdp.get_seq(ac, position - length - 1, position)
+        # Otherwise a preceding copy ends at position, padded by the base at padding_position
+        padding_position = position - length
+        padding_i = padding_position - 1
+        if padding_i < 0:
+            # No room for a preceding copy this close to the start of the sequence
+            return None
+        padded = self.hdp.get_seq(ac, padding_i, insertion_i)
         if padded[1:] == inserted:
-            return VCFCoordinate(ac, position - length, padded[0], SYMBOLIC_DUP, end=position)
+            return VCFCoordinate(ac, padding_position, padded[0], SYMBOLIC_DUP, end=position)
         return None
 
     @staticmethod
