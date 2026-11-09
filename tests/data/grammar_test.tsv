@@ -74,6 +74,10 @@ nnum	123|+123	false	list
 num	1234567890	True	one
 num	1234567890	True	string
 num	123X	False	one
+repeat_count	[2]|[10_36]|[51_?]|[(90_?)]	True	list	(2, 2, False)|(10, 36, False)|(51, None, False)|(90, None, True)
+repeat_count	[]|[2_]|(2)|[(2]|[?]	False	list
+repeat_count_range	2|10_36|51_?	True	list	(2, 2)|(10, 36)|(51, None)
+repeat_count_range	_2|?|a|2_	False	list
 offset		True	one	0
 offset	10|-10	True	list
 pm	*	False	one
@@ -180,10 +184,13 @@ dna_delins	delAinsT	True	one	A>T
 dna_dup	dupCAU	False	one
 dna_dup	dup|dupA|dupCAG|dupCAT	True	list	dup|dup|dup|dup
 dna_edit	A>C|delAAinsC|insA|delA|dupA	True	list	A>C|delinsC|insA|del|dup
+dna_edit	AGG[2]|CAG[10_36]|[7]	True	list
 dna_edit	A>U|del5A	False	list
 dna_edit_mu	(A>C)	True	one
 dna_edit_mu	A>C	True	one
 dna_ident	=|T=|ACG=	True	list	=|=|=
+dna_repeat	AGG[2]|[7]|GCA[10_36]|CTG[51_?]|CGG[(90_?)]|agg[2]|AGG[(2)]	True	list
+dna_repeat	AGG[]|AGG[2_]|AGG[_2]|AGG(2)|[?]|AGG[a]|AGG[(2]	False	list
 dna_ins	insA|insC|insG|insT	True	list
 dna_ins	insU	False	one
 dna_inv	inv	True	list

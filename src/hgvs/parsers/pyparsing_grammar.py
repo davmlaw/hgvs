@@ -64,6 +64,23 @@ def _s(val):
     return val
 
 
+#: Sentinel for an unknown repeat count bound ("?"), e.g. c.*224CTG[51_?].
+_UNKNOWN_COUNT = object()
+
+
+def _make_repeat_count_range(t):
+    """Parse action for ``repeat_count_range``: returns ``(min, max)`` as one token.
+
+    ``max`` equals ``min`` when no range is given and is None for ``?``.
+    """
+    grp = t[0]
+    mn = grp[0]
+    mx = grp[1] if len(grp) > 1 else mn
+    if mx is _UNKNOWN_COUNT:
+        mx = None
+    return [(mn, mx)]
+
+
 class HGVSGrammar:
     """All HGVS grammar rules as pyparsing ParserElements.
 
@@ -463,6 +480,24 @@ class HGVSGrammar:
             lambda t: hgvs.edit.NACopy(copy=t[0])
         )
 
+        # Repeated sequences, e.g. c.938AGG[2], c.6955_6993CAG[26], c.220_222[1],
+        # c.171GCA[10_36], c.*224CTG[51_?], c.-102CGG[(90_?)]. The unit is optional
+        # when the interval spans one copy. Parentheses mark an uncertain copy number.
+        _unknown_count = pp.Literal("?").add_parse_action(lambda: _UNKNOWN_COUNT)
+        self.repeat_count_range = pp.Group(
+            self.num + pp.Optional(pp.Suppress("_") + (self.num | _unknown_count))
+        ).add_parse_action(_make_repeat_count_range)
+        self.repeat_count = (
+            pp.Suppress("[(") + self.repeat_count_range + pp.Suppress(")]")
+        ).add_parse_action(lambda t: (*t[0], True)) | (
+            pp.Suppress("[") + self.repeat_count_range + pp.Suppress("]")
+        ).add_parse_action(lambda t: (*t[0], False))
+        self.dna_repeat = (
+            pp.Optional(pp.Combine(self.dna[1, ...]), default=None) + self.repeat_count
+        ).add_parse_action(
+            lambda t: hgvs.edit.Repeat(ref=t[0], min=t[1][0], max=t[1][1], uncertain=t[1][2])
+        )
+
         self.dna_edit = (
             self.dna_ident
             | self.dna_subst
@@ -473,6 +508,7 @@ class HGVSGrammar:
             | self.dna_inv
             | self.dna_con
             | self.dna_copy
+            | self.dna_repeat
         )
 
         self.dna_edit_mu = self.dna_edit | (

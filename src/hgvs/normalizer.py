@@ -6,6 +6,7 @@ import logging
 from bioutils.sequences import reverse_complement
 
 import hgvs
+import hgvs.repeats
 import hgvs.validator
 import hgvs.variantmapper
 from hgvs.exceptions import (
@@ -81,6 +82,9 @@ class Normalizer:
         if var.posedit.edit.type == "con":
             msg = f"Unsupported normalization of conversion variants: {var}"
             raise HGVSUnsupportedOperationError(msg)
+        if var.posedit.edit.type == "repeat":
+            # e.g. c.938AGG[2] -> c.938_940dupAGG, which then normalizes as usual
+            var = hgvs.repeats.expand_repeat(var, self.hdp)
 
         var.fill_ref(self.hdp)
 

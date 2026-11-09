@@ -493,22 +493,35 @@ class Dup(Edit):
 
 @attr.s(slots=True)
 class Repeat(Edit):
+    """
+    represents a repeated sequence, e.g. ``AGG[2]``, ``CAG[10_36]``, ``CGG[(90_?)]``
+
+    :ivar ref: the repeat unit (e.g. "AGG"), or None when the unit is implied by the interval
+    :ivar min: copy number, or the lower bound of a copy number range
+    :ivar max: copy number, or the upper bound of a copy number range; None for "?"
+    :ivar uncertain: boolean indicating whether the copy number range is uncertain (``[(min_max)]``)
+
+    The unit is part of the variant's meaning, so it is always formatted regardless of
+    ``max_ref_length``. ``c.938AGG[2]`` is a different variant from ``c.938[2]``.
+    """
+
     ref = attr.ib(default=None)
     min = attr.ib(default=None)
     max = attr.ib(default=None)
     uncertain = attr.ib(default=False)
 
     def format(self, conf=None):
-        if self.min > self.max:
+        if self.max is not None and self.min > self.max:
             msg = "Repeat min count must be less than or equal to max count"
             raise HGVSError(msg)
-        max_ref_length = self._format_config_na(conf)
-        ref = self.ref
-        if max_ref_length is not None and (ref is None or len(ref) > max_ref_length):
-            ref = ""
+        ref = self.ref or ""
         if self.min == self.max:
-            return f"{ref}[{self.min}]"
-        return f"{ref}({self.min}_{self.max})"
+            count = str(self.min)
+        else:
+            count = f"{self.min}_{'?' if self.max is None else self.max}"
+        if self.uncertain:
+            count = f"({count})"
+        return f"{ref}[{count}]"
 
     __str__ = format
 

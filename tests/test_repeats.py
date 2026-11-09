@@ -1,7 +1,15 @@
 import pytest
+import hgvs.parsers
+import hgvs.validator
+from hgvs.exceptions import HGVSInvalidVariantError, HGVSUnsupportedOperationError
 from hgvs.pretty.datacompiler import DataCompiler
 from hgvs.pretty.models import PrettyConfig, VariantCoords
-from hgvs.repeats import RepeatAnalyser, detect_repetitive_block_lengths, get_repeat_str
+from hgvs.repeats import (
+    RepeatAnalyser,
+    detect_repetitive_block_lengths,
+    expand_repeat,
+    get_repeat_str,
+)
 
 
 def to_hgvs_repeat(chrom_ac, fs: VariantCoords, ra: RepeatAnalyser):
@@ -391,3 +399,156 @@ class TestRepeatMethods:
 
         alt_repeat = get_repeat_str(alt, ref, repeat_units_alt, repeat_units_ref)
         assert alt_repeat == expected_alt_repeat
+
+
+# ---------------------------------------------------------------------------
+# expand_repeat: parsed repeat notation -> dup / ins / del / identity
+# ---------------------------------------------------------------------------
+
+# positions:        1234 567 890 123 4567890123 4
+_TX_SEQ = "ACGT" + "AGGAGGAGG" + "TCTCTCTCTC" + "A"
+_TX_AC = "NM_TEST.1"
+_G_AC = "NC_TEST.1"
+_POLY_T_AC = "NM_POLYT.1"
+_POLY_T_SEQ = "A" + "T" * 200 + "G"
+
+
+class _SequenceDataProvider:
+    """The minimum of a data provider needed by expand_repeat: sequences and, for c.
+    variants, the CDS bounds. c.1 is n.5 (the first AGG)."""
+
+    def __init__(self):
+        self.seqs = {_TX_AC: _TX_SEQ, _G_AC: _TX_SEQ, _POLY_T_AC: _POLY_T_SEQ}
+
+    def get_seq(self, ac, start_i=0, end_i=None):
+        return self.seqs[ac][start_i:end_i]
+
+    def get_tx_identity_info(self, tx_ac):
+        seq = self.seqs[tx_ac]
+        return {
+            "tx_ac": tx_ac,
+            "alt_ac": tx_ac,
+            "alt_aln_method": "transcript",
+            "cds_start_i": 4,
+            "cds_end_i": 22,
+            "lengths": [len(seq)],
+            "hgnc": "TEST",
+        }
+
+
+@pytest.fixture(scope="module")
+def seq_hdp():
+    return _SequenceDataProvider()
+
+
+@pytest.fixture(scope="module")
+def hp():
+    return hgvs.parsers.Parser()
+
+
+def _expand(hp, seq_hdp, hgvs_str):
+    var = expand_repeat(hp.parse(hgvs_str), seq_hdp)
+    return var.format(conf={"max_ref_length": None})
+
+
+@pytest.mark.parametrize(
+    ("hgvs_str", "expected"),
+    [
+        # the reference has 3 copies of AGG at n.5_13
+        ("NM_TEST.1:n.5AGG[3]", "NM_TEST.1:n.5_13AGGAGGAGG="),
+        ("NM_TEST.1:n.5AGG[4]", "NM_TEST.1:n.11_13dupAGG"),
+        ("NM_TEST.1:n.5AGG[5]", "NM_TEST.1:n.8_13dupAGGAGG"),
+        ("NM_TEST.1:n.5AGG[6]", "NM_TEST.1:n.5_13dupAGGAGGAGG"),
+        # more extra copies than the reference has: insertion after the repeat
+        ("NM_TEST.1:n.5AGG[7]", "NM_TEST.1:n.13_14insAGGAGGAGGAGG"),
+        ("NM_TEST.1:n.5AGG[2]", "NM_TEST.1:n.11_13delAGG"),
+        ("NM_TEST.1:n.5AGG[1]", "NM_TEST.1:n.8_13delAGGAGG"),
+        ("NM_TEST.1:n.5AGG[0]", "NM_TEST.1:n.5_13delAGGAGGAGG"),
+        # unit case-insensitive
+        ("NM_TEST.1:n.5agg[4]", "NM_TEST.1:n.11_13dupAGG"),
+        # interval forms: one copy without a unit (ClinVar c.220_222[1]) ...
+        ("NM_TEST.1:n.5_7[1]", "NM_TEST.1:n.8_13delAGGAGG"),
+        ("NM_TEST.1:n.5_7[4]", "NM_TEST.1:n.11_13dupAGG"),
+        # ... the whole reference repeat with a unit (HGVS c.6955_6993CAG[26]) ...
+        ("NM_TEST.1:n.5_13AGG[4]", "NM_TEST.1:n.11_13dupAGG"),
+        ("NM_TEST.1:n.5_13AGG[2]", "NM_TEST.1:n.11_13delAGG"),
+        # ... and an interval without a unit, where the interval is the unit
+        ("NM_TEST.1:n.5_13[2]", "NM_TEST.1:n.5_13dupAGGAGGAGG"),
+        # c. coordinates (c.1 == n.5)
+        ("NM_TEST.1:c.1AGG[2]", "NM_TEST.1:c.7_9delAGG"),
+        ("NM_TEST.1:c.1AGG[4]", "NM_TEST.1:c.7_9dupAGG"),
+        ("NM_TEST.1:c.1AGG[7]", "NM_TEST.1:c.9_10insAGGAGGAGGAGG"),
+        # g. coordinates
+        ("NC_TEST.1:g.5AGG[4]", "NC_TEST.1:g.11_13dupAGG"),
+        ("NC_TEST.1:g.5_7[1]", "NC_TEST.1:g.8_13delAGGAGG"),
+        # single-base unit, dinucleotide unit
+        ("NM_TEST.1:n.14TC[3]", "NM_TEST.1:n.20_23delTCTC"),
+        ("NM_TEST.1:n.14TC[6]", "NM_TEST.1:n.22_23dupTC"),
+    ],
+)
+def test_expand_repeat(hp, seq_hdp, hgvs_str, expected):
+    assert _expand(hp, seq_hdp, hgvs_str) == expected
+
+
+def test_expand_repeat_long_reference_repeat(hp, seq_hdp):
+    # 200 T's: exercises counting across several sequence chunks
+    assert _expand(hp, seq_hdp, "NM_POLYT.1:n.2T[150]") == "NM_POLYT.1:n.152_201del" + "T" * 50
+    assert _expand(hp, seq_hdp, "NM_POLYT.1:n.2T[201]") == "NM_POLYT.1:n.201dupT"
+    assert _expand(hp, seq_hdp, "NM_POLYT.1:n.2T[200]") == "NM_POLYT.1:n.2_201" + "T" * 200 + "="
+
+
+def test_expand_repeat_default_formatting(hp, seq_hdp):
+    # with the default max_ref_length the expanded variant looks like any other dup/del
+    var = expand_repeat(hp.parse("NM_TEST.1:c.1AGG[4]"), seq_hdp)
+    assert str(var) == "NM_TEST.1:c.7_9dup"
+    assert var.posedit.edit.type == "dup"
+    var = expand_repeat(hp.parse("NM_TEST.1:n.5AGG[3]"), seq_hdp)
+    assert str(var) == "NM_TEST.1:n.5_13="
+    assert var.posedit.edit.type == "identity"
+
+
+def test_expand_repeat_passthrough(hp, seq_hdp):
+    var = hp.parse("NM_TEST.1:n.5A>T")
+    assert expand_repeat(var, seq_hdp) is var
+
+
+def test_expand_repeat_keeps_gene(hp, seq_hdp):
+    var = expand_repeat(hp.parse("NM_TEST.1(TEST):c.1AGG[4]"), seq_hdp)
+    assert var.gene == "TEST"
+
+
+@pytest.mark.parametrize(
+    "hgvs_str",
+    [
+        "NM_TEST.1:n.5AGG[2_3]",
+        "NM_TEST.1:n.5AGG[(2_3)]",
+        "NM_TEST.1:n.5AGG[2_?]",
+        "NM_TEST.1:c.1+5AGG[2]",  # intronic
+        "NM_TEST.1:c.(1_3)AGG[2]",  # uncertain position
+    ],
+)
+def test_expand_repeat_unsupported(hp, seq_hdp, hgvs_str):
+    with pytest.raises(HGVSUnsupportedOperationError):
+        expand_repeat(hp.parse(hgvs_str), seq_hdp)
+
+
+@pytest.mark.parametrize(
+    "hgvs_str",
+    [
+        "NM_TEST.1:n.6AGG[2]",  # GGA at n.6, not AGG
+        "NM_TEST.1:n.5CAG[2]",
+        "NM_TEST.1:n.5_8AGG[2]",  # interval not a multiple of the unit
+        "NM_TEST.1:n.5_16AGG[2]",  # interval spans 4 copies, reference has 3
+    ],
+)
+def test_expand_repeat_invalid(hp, seq_hdp, hgvs_str):
+    with pytest.raises(HGVSInvalidVariantError):
+        expand_repeat(hp.parse(hgvs_str), seq_hdp)
+
+
+def test_validator_checks_repeat_unit(hp, seq_hdp):
+    """The extrinsic validator checks the first copy of the unit at the start position."""
+    ev = hgvs.validator.ExtrinsicValidator(seq_hdp)
+    assert ev.validate(hp.parse("NM_TEST.1:n.5AGG[2]"))
+    with pytest.raises(HGVSInvalidVariantError):
+        ev.validate(hp.parse("NM_TEST.1:n.6AGG[2]"))

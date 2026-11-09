@@ -13,6 +13,7 @@ import hgvs.edit
 import hgvs.location
 import hgvs.normalizer
 import hgvs.posedit
+import hgvs.repeats
 import hgvs.sequencevariant
 import hgvs.validator
 from hgvs.decorators.lru_cache import lru_cache
@@ -167,6 +168,7 @@ class VariantMapper:
             raise HGVSInvalidVariantError("Expected a g. or m. variant; got " + str(var_g))
         if self._validator:
             self._validator.validate(var_g)
+        var_g = self._expand_repeat(var_g)
         mapper = self._fetch_AlignmentMapper(
             tx_ac=tx_ac, alt_ac=var_g.ac, alt_aln_method=alt_aln_method
         )
@@ -248,6 +250,7 @@ class VariantMapper:
             raise HGVSInvalidVariantError("Expected a n. variant; got " + str(var_n))
         if self._validator:
             self._validator.validate(var_n)
+        var_n = self._expand_repeat(var_n)
         var_n.fill_ref(self.hdp, alt_ac=alt_ac, alt_aln_method=alt_aln_method)
         mapper = self._fetch_AlignmentMapper(
             tx_ac=var_n.ac, alt_ac=alt_ac, alt_aln_method=alt_aln_method
@@ -293,6 +296,7 @@ class VariantMapper:
             raise HGVSInvalidVariantError("Expected a g. or m. variant; got " + str(var_g))
         if self._validator:
             self._validator.validate(var_g)
+        var_g = self._expand_repeat(var_g)
 
         var_g.fill_ref(self.hdp)
         mapper = self._fetch_AlignmentMapper(
@@ -363,6 +367,7 @@ class VariantMapper:
             raise HGVSInvalidVariantError("Expected a cDNA (c.); got " + str(var_c))
         if self._validator:
             self._validator.validate(var_c)
+        var_c = self._expand_repeat(var_c)
         var_c.fill_ref(self.hdp, alt_ac=alt_ac, alt_aln_method=alt_aln_method)
         mapper = self._fetch_AlignmentMapper(
             tx_ac=var_c.ac, alt_ac=alt_ac, alt_aln_method=alt_aln_method
@@ -419,10 +424,13 @@ class VariantMapper:
             tx_ac=var_c.ac, alt_ac=var_c.ac, alt_aln_method="transcript"
         )
         pos_n = mapper.c_to_n(var_c.posedit.pos)
-        if isinstance(var_c.posedit.edit, hgvs.edit.NARefAlt | hgvs.edit.Dup | hgvs.edit.Inv):
+        if isinstance(
+            var_c.posedit.edit,
+            hgvs.edit.NARefAlt | hgvs.edit.Dup | hgvs.edit.Inv | hgvs.edit.Repeat,
+        ):
             edit_n = copy.deepcopy(var_c.posedit.edit)
         else:
-            msg = "Only NARefAlt/Dup/Inv types are currently implemented"
+            msg = "Only NARefAlt/Dup/Inv/Repeat types are currently implemented"
             raise HGVSUnsupportedOperationError(msg)
         var_n = hgvs.sequencevariant.SequenceVariant(
             ac=var_c.ac, type="n", posedit=hgvs.posedit.PosEdit(pos_n, edit_n)
@@ -458,10 +466,13 @@ class VariantMapper:
             tx_ac=var_n.ac, alt_ac=var_n.ac, alt_aln_method="transcript"
         )
         pos_c = mapper.n_to_c(var_n.posedit.pos)
-        if isinstance(var_n.posedit.edit, hgvs.edit.NARefAlt | hgvs.edit.Dup | hgvs.edit.Inv):
+        if isinstance(
+            var_n.posedit.edit,
+            hgvs.edit.NARefAlt | hgvs.edit.Dup | hgvs.edit.Inv | hgvs.edit.Repeat,
+        ):
             edit_c = copy.deepcopy(var_n.posedit.edit)
         else:
-            msg = "Only NARefAlt/Dup/Inv types are currently implemented"
+            msg = "Only NARefAlt/Dup/Inv/Repeat types are currently implemented"
             raise HGVSUnsupportedOperationError(msg)
         var_c = hgvs.sequencevariant.SequenceVariant(
             ac=var_n.ac, type="c", posedit=hgvs.posedit.PosEdit(pos_c, edit_c)
@@ -496,6 +507,7 @@ class VariantMapper:
             raise HGVSInvalidVariantError("Expected a cDNA (c.) variant; got " + str(var_c))
         if self._validator:
             self._validator.validate(var_c)
+        var_c = self._expand_repeat(var_c)
         var_c.fill_ref(self.hdp, alt_ac=alt_ac, alt_aln_method=alt_aln_method)
         reference_data = RefTranscriptData(
             self.hdp, var_c.ac, pro_ac, translation_table=translation_table
@@ -553,6 +565,16 @@ class VariantMapper:
 
     ############################################################################
     # Internal methods
+
+    def _expand_repeat(self, var):
+        """Rewrite a repeat variant (e.g. c.938AGG[2]) as a plain dup/ins/del/identity variant.
+
+        Repeats are expanded before mapping because the genomic equivalent depends on
+        how many copies the reference has. See :func:`hgvs.repeats.expand_repeat`.
+        """
+        if var.posedit is not None and isinstance(var.posedit.edit, hgvs.edit.Repeat):
+            return hgvs.repeats.expand_repeat(var, self.hdp)
+        return var
 
     def _replace_reference(
         self, var, alt_ac=None, alt_aln_method=hgvs.global_config.mapping.alt_aln_method

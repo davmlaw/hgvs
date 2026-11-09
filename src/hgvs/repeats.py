@@ -1,10 +1,164 @@
-"""A class to manage conversion of SequenceVariants to repeat representation"""
+"""Repeat (e.g. ``AGG[2]``) support: expanding parsed repeats into plain edits, and
+detecting repeats in ref/alt sequences for pretty printing."""
 
+from __future__ import annotations
+
+import copy
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import hgvs
-from hgvs.pretty.models import VariantCoords
+import hgvs.edit
+import hgvs.location
+import hgvs.posedit
+import hgvs.sequencevariant
+from hgvs.exceptions import HGVSInvalidVariantError, HGVSUnsupportedOperationError
+
+if TYPE_CHECKING:
+    from hgvs.pretty.models import VariantCoords
+
+
+def expand_repeat(var, hdp):
+    """Rewrite a repeat variant as the equivalent dup / ins / del / identity variant.
+
+    HGVS repeat notation gives the total copy number of a repeat unit in the
+    variant allele, e.g. ``NM_000059.4:c.938AGG[2]`` means "two copies of AGG
+    starting at c.938". The reference is consulted to count the copies present
+    at that position; the difference is then written as a plain edit placed at
+    the 3' end of the repeat, following the HGVS 3' rule:
+
+    * more copies than the reference: ``dup`` of the trailing copies when the
+      extra copies fit inside the reference repeat, otherwise ``ins`` after it
+    * fewer copies: ``del`` of the trailing copies
+    * the same number: identity (``=``)
+
+    Accepted forms: a start position with a unit (``c.938AGG[2]``), an interval
+    with a unit (``c.6955_6993CAG[26]``), or an interval without a unit
+    (``c.220_222[1]``), where the interval is one or more copies of the unit.
+
+    Variants that are not repeats are returned unchanged. Uncertain copy
+    numbers (``GCA[10_36]``, ``CGG[(90_?)]``) and intronic positions raise
+    :class:`HGVSUnsupportedOperationError`. A unit that is not found in the
+    reference at the stated position raises :class:`HGVSInvalidVariantError`.
+
+    :param var: a :class:`hgvs.sequencevariant.SequenceVariant` of type c, g, m or n
+    :param hdp: a data provider (for ``get_seq`` and, for c. variants, ``get_tx_identity_info``)
+    :returns: a new :class:`hgvs.sequencevariant.SequenceVariant`
+    """
+    if var.posedit is None or not isinstance(var.posedit.edit, hgvs.edit.Repeat):
+        return var
+
+    edit = var.posedit.edit
+    if edit.uncertain or edit.max is None or edit.min != edit.max:
+        msg = f"Cannot expand repeat with uncertain copy number: {var}"
+        raise HGVSUnsupportedOperationError(msg)
+    if var.type not in "cgmn":
+        msg = f"Repeat expansion is only supported for c, g, m and n variants: {var}"
+        raise HGVSUnsupportedOperationError(msg)
+
+    pos = var.posedit.pos
+    if (
+        pos is None
+        or pos.uncertain
+        or not _is_definite_position(pos.start)
+        or not _is_definite_position(pos.end)
+    ):
+        msg = f"Cannot expand repeat with uncertain position: {var}"
+        raise HGVSUnsupportedOperationError(msg)
+
+    # Work in sequence (n. or g.) coordinates; convert c. positions via the CDS offset.
+    mapper = None
+    if var.type == "c":
+        from hgvs.alignmentmapper import AlignmentMapper  # noqa: PLC0415 - import cycle
+
+        mapper = AlignmentMapper(hdp, var.ac, var.ac, "transcript")
+        pos = mapper.c_to_n(pos)
+    if getattr(pos.start, "offset", 0) != 0 or getattr(pos.end, "offset", 0) != 0:
+        msg = f"Repeat expansion of intronic variants is not supported: {var}"
+        raise HGVSUnsupportedOperationError(msg)
+
+    start_i = pos.start.base - 1  # 0-based, inclusive
+    end_i = pos.end.base  # 0-based, exclusive
+
+    unit = edit.ref.upper() if edit.ref else hdp.get_seq(var.ac, start_i, end_i).upper()
+    unit_len = len(unit)
+    span = end_i - start_i
+    if span > 1 and span % unit_len != 0:
+        msg = f"Repeat interval length ({span}) is not a multiple of the unit length ({unit_len}): {var}"
+        raise HGVSInvalidVariantError(msg)
+
+    ref_copies = _count_reference_copies(hdp, var.ac, start_i, unit)
+    if ref_copies == 0:
+        found = hdp.get_seq(var.ac, start_i, start_i + unit_len)
+        msg = f"Repeat unit {unit} not found at position {pos.start} of {var.ac} (found {found}): {var}"
+        raise HGVSInvalidVariantError(msg)
+    if span > 1 and span // unit_len > ref_copies:
+        msg = (
+            f"Repeat interval spans {span // unit_len} copies of {unit} but the reference "
+            f"has {ref_copies} at position {pos.start} of {var.ac}: {var}"
+        )
+        raise HGVSInvalidVariantError(msg)
+
+    alt_copies = edit.min
+    repeat_end = (
+        pos.start.base + ref_copies * unit_len - 1
+    )  # 1-based last base of the reference repeat
+    if alt_copies == ref_copies:
+        new_start, new_end = pos.start.base, repeat_end
+        new_edit = hgvs.edit.NARefAlt(ref=unit * ref_copies, alt=unit * ref_copies)
+    elif alt_copies > ref_copies:
+        extra = alt_copies - ref_copies
+        if extra <= ref_copies:
+            new_start, new_end = repeat_end - extra * unit_len + 1, repeat_end
+            new_edit = hgvs.edit.Dup(ref=unit * extra)
+        else:
+            new_start, new_end = repeat_end, repeat_end + 1
+            new_edit = hgvs.edit.NARefAlt(ref=None, alt=unit * extra)
+    else:
+        removed = ref_copies - alt_copies
+        new_start, new_end = repeat_end - removed * unit_len + 1, repeat_end
+        new_edit = hgvs.edit.NARefAlt(ref=unit * removed, alt=None)
+
+    start_pos = copy.deepcopy(pos.start)
+    end_pos = copy.deepcopy(pos.end)
+    start_pos.base = new_start
+    end_pos.base = new_end
+    new_pos = type(pos)(start=start_pos, end=end_pos, uncertain=False)
+    if mapper is not None:
+        new_pos = mapper.n_to_c(new_pos)
+
+    return hgvs.sequencevariant.SequenceVariant(
+        ac=var.ac,
+        type=var.type,
+        posedit=hgvs.posedit.PosEdit(pos=new_pos, edit=new_edit),
+        gene=var.gene,
+    )
+
+
+def _is_definite_position(p):
+    return (
+        p is not None
+        and not isinstance(p, hgvs.location.Interval)
+        and getattr(p, "base", None) is not None
+        and not p.uncertain
+    )
+
+
+def _count_reference_copies(hdp, ac, start_i, unit, chunk_units=64):
+    """Count consecutive copies of `unit` in sequence `ac` beginning at 0-based `start_i`."""
+    unit_len = len(unit)
+    copies = 0
+    pos = start_i
+    while True:
+        chunk = hdp.get_seq(ac, pos, pos + unit_len * chunk_units).upper()
+        n = 0
+        while (n + 1) * unit_len <= len(chunk) and chunk.startswith(unit, n * unit_len):
+            n += 1
+        copies += n
+        if n < chunk_units:
+            return copies
+        pos += unit_len * chunk_units
 
 
 @dataclass(eq=True, repr=True, frozen=True, order=True)

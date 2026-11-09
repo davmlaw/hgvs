@@ -59,10 +59,9 @@ class SequenceVariant:
             self.posedit.edit, hgvs.edit.Edit
         ):
             edit_type = self.posedit.edit.type
-        if (
-            edit_type in ["del", "delins", "identity", "dup", "repeat"]
-            and self.posedit.edit.ref_s is None
-        ):
+        # Repeat edits are excluded: their `ref` is the repeat unit, not the
+        # reference sequence of the interval. See hgvs.repeats.expand_repeat.
+        if edit_type in ["del", "delins", "identity", "dup"] and self.posedit.edit.ref_s is None:
             vm._replace_reference(self, alt_ac=alt_ac, alt_aln_method=alt_aln_method)
         if edit_type == "identity" and isinstance(self.posedit.edit, hgvs.edit.NARefAlt):
             self.posedit.edit.alt = self.posedit.edit.ref

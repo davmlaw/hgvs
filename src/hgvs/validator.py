@@ -143,6 +143,11 @@ class ExtrinsicValidator:
             var_n = self.vm.c_to_n(var) if var.type == "c" else var
             if var_n.posedit.pos.start.uncertain or var_n.posedit.pos.end.uncertain:
                 ref_checks.append((var_n.ac, None, None, var_ref_seq))
+            elif var_n.posedit.edit.type == "repeat":
+                # ref is the repeat unit; check the first copy at the start position
+                # (the position may be a single base, e.g. c.938AGG[2])
+                start = var_n.posedit.pos.start.base
+                ref_checks.append((var_n.ac, start, start + len(var_ref_seq) - 1, var_ref_seq))
             else:
                 ref_checks.append((
                     var_n.ac,

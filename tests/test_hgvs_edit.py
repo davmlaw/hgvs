@@ -93,9 +93,15 @@ class Test_Edit(unittest.TestCase):
         self.assertEqual(str(hgvs.edit.Dup("T").type), "dup")
 
     def test_Repeat(self):
-        self.assertEqual(
-            hgvs.edit.Repeat("CAG", 12, 34).format(conf={"max_ref_length": None}), "CAG(12_34)"
-        )
+        self.assertEqual(str(hgvs.edit.Repeat("AGG", 2, 2)), "AGG[2]")
+        self.assertEqual(str(hgvs.edit.Repeat("CAG", 12, 34)), "CAG[12_34]")
+        self.assertEqual(str(hgvs.edit.Repeat("CTG", 51, None)), "CTG[51_?]")
+        self.assertEqual(str(hgvs.edit.Repeat("CGG", 90, None, uncertain=True)), "CGG[(90_?)]")
+        self.assertEqual(str(hgvs.edit.Repeat("GAA", 200, 900, uncertain=True)), "GAA[(200_900)]")
+        # unit is optional when the interval implies it, e.g. c.220_222[1]
+        self.assertEqual(str(hgvs.edit.Repeat(None, 7, 7)), "[7]")
+        # the unit is part of the variant's meaning, so max_ref_length does not strip it
+        self.assertEqual(hgvs.edit.Repeat("AGG", 2, 2).format(conf={"max_ref_length": 0}), "AGG[2]")
         # edit types
         self.assertEqual(str(hgvs.edit.Repeat("CAG", 12, 34).type), "repeat")
 
