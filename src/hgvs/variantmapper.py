@@ -18,6 +18,7 @@ import hgvs.validator
 from hgvs.decorators.lru_cache import lru_cache
 from hgvs.enums import PrevalidationLevel, ShiftOverBoundaryPreference
 from hgvs.exceptions import (
+    HGVSExonJunctionSpanError,
     HGVSInvalidIntervalError,
     HGVSInvalidVariantError,
     HGVSUnsupportedOperationError,
@@ -79,15 +80,20 @@ class VariantMapper:
         add_gene_symbol=hgvs.global_config.mapping.add_gene_symbol,
         shift_over_boundary=hgvs.global_config.mapping.shift_over_boundary,
         shift_over_boundary_preference=hgvs.global_config.mapping.shift_over_boundary_preference,
+        strict_exon_junction=hgvs.global_config.mapping.strict_exon_junction,
     ):
         """
         :param bool replace_reference: replace reference (entails additional network access)
         :param str prevalidation_level: None or Intrinsic or Extrinsic validation before mapping
+        :param bool strict_exon_junction: raise HGVSExonJunctionSpanError when a c./n. del,
+            delins, dup, inv or ins interval spans an exon junction, instead of returning a
+            genomic variant that includes the intervening intron
 
         """
         self.hdp = hdp
         self.replace_reference = replace_reference
         self.add_gene_symbol = add_gene_symbol
+        self.strict_exon_junction = strict_exon_junction
         if prevalidation_level is None:
             self.prevalidation_level = PrevalidationLevel.NONE
         else:
@@ -252,6 +258,7 @@ class VariantMapper:
         mapper = self._fetch_AlignmentMapper(
             tx_ac=var_n.ac, alt_ac=alt_ac, alt_aln_method=alt_aln_method
         )
+        self._check_exon_junction(mapper, var_n, var_n.posedit.pos, alt_ac)
         pos_g = mapper.n_to_g(var_n.posedit.pos)
         if not pos_g.uncertain:
             edit_g = self._convert_edit_check_strand(mapper.strand, var_n.posedit.edit)
@@ -367,6 +374,7 @@ class VariantMapper:
         mapper = self._fetch_AlignmentMapper(
             tx_ac=var_c.ac, alt_ac=alt_ac, alt_aln_method=alt_aln_method
         )
+        self._check_exon_junction(mapper, var_c, mapper.c_to_n(var_c.posedit.pos), alt_ac)
         pos_g = mapper.c_to_g(var_c.posedit.pos)
 
         if not pos_g.uncertain:
@@ -553,6 +561,30 @@ class VariantMapper:
 
     ############################################################################
     # Internal methods
+
+    #: edit types whose interval must be contiguous on the genome to have a single
+    #: genomic equivalent (a substitution is one base; identity changes nothing)
+    _EXON_JUNCTION_EDIT_TYPES = frozenset({"del", "delins", "dup", "inv", "ins"})
+
+    def _check_exon_junction(self, mapper, var_t, pos_n, alt_ac):
+        """Raise HGVSExonJunctionSpanError if a transcript variant's interval spans an
+        exon junction, e.g. NM_000059.4:c.8331_8332del (last base of one exon, first of
+        the next). Mapping each end separately would delete the whole intron too.
+        """
+        if not self.strict_exon_junction:
+            return
+        if var_t.posedit.edit.type not in self._EXON_JUNCTION_EDIT_TYPES:
+            return
+        junctions = mapper.n_exon_junctions_spanned(pos_n)
+        if junctions:
+            j = junctions[0]
+            msg = (
+                f"{var_t}: interval spans an exon junction of {var_t.ac} (between n.{j} and "
+                f"n.{j + 1}); these bases are adjacent on the transcript but not on {alt_ac}, "
+                "so the variant has no single genomic equivalent. Use "
+                "strict_exon_junction=False to map the span including the intron."
+            )
+            raise HGVSExonJunctionSpanError(msg)
 
     def _replace_reference(
         self, var, alt_ac=None, alt_aln_method=hgvs.global_config.mapping.alt_aln_method

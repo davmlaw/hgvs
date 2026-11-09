@@ -80,6 +80,7 @@ class AlignmentMapper:
         "ref_pos",
         "strand",
         "tgt_len",
+        "tx_exon_junctions",
         "tgt_pos",
         "tx_ac",
     )
@@ -125,6 +126,10 @@ class AlignmentMapper:
             self.cds_start_i = tx_info["cds_start_i"]
             self.cds_end_i = tx_info["cds_end_i"]
 
+            # 0-based transcript index of each exon junction: tx_end_i of every exon
+            # but the last (which equals tx_start_i of the following exon)
+            self.tx_exon_junctions = [e["tx_end_i"] for e in sorted_tx_exons[:-1]]
+
             cigar = build_tx_cigar(tx_exons, self.strand)
             self.cigarmapper = CIGARMapper(cigar)
             self.tgt_len = self.cigarmapper.tgt_len
@@ -143,6 +148,7 @@ class AlignmentMapper:
             self.cds_end_i = tx_identity_info["cds_end_i"]
             self.tgt_len = sum(tx_identity_info["lengths"])
             self.cigarmapper = None
+            self.tx_exon_junctions = []
 
         assert not ((self.cds_start_i is None) ^ (self.cds_end_i is None)), (
             "CDS start and end must both be defined or neither defined"
@@ -733,6 +739,34 @@ class AlignmentMapper:
         grs = ival.start.base - 1 - self.gc_offset
         gre = ival.end.base - 1 - self.gc_offset
         return grs >= 0 and gre <= self.cigarmapper.ref_len
+
+    def n_exon_junctions_spanned(self, n_interval) -> list[int]:
+        """Return the exon junctions spanned by a transcript (n.) interval.
+
+        A junction is spanned when the interval's start and end are both exonic
+        (zero offset) and lie in different exons: the interval then covers bases
+        that are adjacent on the transcript but separated by an intron on the
+        genome, e.g. ``NM_000059.4:c.8331_8332`` (last base of one BRCA2 exon,
+        first base of the next). Intervals with intronic offsets or uncertain
+        ends never span a junction in this sense and return ``[]``.
+
+        Args:
+            n_interval: A transcript interval
+
+        Returns:
+            The 1-based transcript position of the last base before each
+            spanned junction, in transcript order; empty if none is spanned.
+        """
+        if not self.tx_exon_junctions:
+            return []
+        for p in (n_interval.start, n_interval.end):
+            if p is None or isinstance(p, Interval) or getattr(p, "base", None) is None:
+                return []
+            if getattr(p, "offset", 0) != 0:
+                return []
+        start_i = n_interval.start.base - 1  # 0-based, inclusive
+        end_i = n_interval.end.base - 1
+        return [j for j in self.tx_exon_junctions if start_i < j <= end_i]
 
     def fix_offset(self, pos):
         if isinstance(pos, int):

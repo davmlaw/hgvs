@@ -21,6 +21,12 @@ class HGVSInvalidVariantError(HGVSError):
     """Exception raised when variant is inconsistent or invalid"""
 
 
+class HGVSExonJunctionSpanError(HGVSInvalidVariantError):
+    """Exception raised when a transcript (c./n.) interval spans an exon junction: its ends
+    lie in different exons, so the bases it covers are adjacent on the transcript but
+    separated by an intron on the genome, and the variant has no single genomic equivalent"""
+
+
 class HGVSNormalizationError(HGVSError):
     pass
 
